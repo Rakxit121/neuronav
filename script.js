@@ -1,273 +1,1056 @@
-// ===== Settings =====
-const N = 10;                 // the maze is N x N cells
-const MAX_TRAIN = 300;        // give up on a practice maze after this many steps
-const MAX_TEST = 400;         // same, for the test maze
-const D = [[0,-1],[1,0],[0,1],[-1,0]];   // directions: up, right, down, left
+// ============================================================
+// NeuroNav
+// A*, Dijkstra, and Q-learning racing on generated mazes.
+// ============================================================
 
-// ===== Grab things from the page =====
-const $ = id => document.getElementById(id);
-const cv = $('maze'), cx = cv.getContext('2d');
-const ch = $('chart'), cc = ch.getContext('2d');
+const N = 16;
+const MAX_STEPS = 700;
+const TRAIN_BATCH = 30;
+const FRAME_STEP_MS = 65;
 
-// ===== The robot's brain: a table of scores =====
-// 256 possible wall/visited patterns x 9 goal directions x 4 possible moves
-const Q = new Float32Array(256 * 9 * 4);
-const seen = new Uint8Array(256 * 9);
-let eps = 0, nSeen = 0, ex = 0.35, training = false, hist = [];
-let batch = { s: 0, n: 0, eff: 0 }, demoOn = false, acc = 0, last = 0;
-const rnd = n => Math.floor(Math.random() * n);
+const DIRECTIONS = [
+  [0, -1], // up
+  [1, 0],  // right
+  [0, 1],  // down
+  [-1, 0]  // left
+];
 
-// ===== 1. Making a random maze =====
-// Start in a random cell, keep carving into unvisited neighbours,
-// and back up when stuck. Each cell stores which of its 4 walls exist.
-function genMaze() {
-  const w = new Uint8Array(N * N).fill(15);   // 15 = all four walls present
-  const vis = new Uint8Array(N * N);
-  const st = [rnd(N * N)];
-  vis[st[0]] = 1;
-  while (st.length) {
-    const c = st[st.length - 1], x = c % N, y = Math.floor(c / N), opts = [];
-    D.forEach((d, i) => {
-      const nx = x + d[0], ny = y + d[1];
-      if (nx >= 0 && ny >= 0 && nx < N && ny < N && !vis[ny * N + nx]) opts.push(i);
-    });
-    if (!opts.length) { st.pop(); continue; }
-    const i = opts[rnd(opts.length)];
-    const n = (y + D[i][1]) * N + x + D[i][0];
-    w[c] &= ~(1 << i);                 // knock down the wall here...
-    w[n] &= ~(1 << ((i + 2) % 4));     // ...and the matching wall next door
-    vis[n] = 1;
-    st.push(n);
-  }
-  return w;
+const COLORS = {
+  background: '#080d18',
+  grid: '#162039',
+  wall: '#9eabc2',
+  astar: '#61a5ff',
+  dijkstra: '#42d6a4',
+  neural: '#ffb454',
+  goal: '#ff6b9d'
+};
+
+const canvas = document.getElementById('maze');
+const ctx = canvas.getContext('2d');
+
+const ui = {
+  train: document.getElementById('train'),
+  race: document.getElementById('race'),
+  reset: document.getElementById('reset'),
+  status: document.getElementById('status'),
+  aStat: document.getElementById('aStat'),
+  dStat: document.getElementById('dStat'),
+  qStat: document.getElementById('qStat'),
+  episodes: document.getElementById('episodes'),
+  epsilon: document.getElementById('epsilon'),
+  states: document.getElementById('states'),
+  wins: document.getElementById('wins')
+};
+
+// 256 local wall/visit patterns × 9 goal directions × 4 actions.
+const qTable = new Float32Array(256 * 9 * 4);
+const seenStates = new Uint8Array(256 * 9);
+
+let episodes = 0;
+let epsilon = 0.35;
+let learnedStates = 0;
+let trainingWins = 0;
+let training = false;
+
+let race = null;
+let lastFrame = 0;
+
+// ------------------------------------------------------------
+// Utilities
+// ------------------------------------------------------------
+
+const randomInt = max => Math.floor(Math.random() * max);
+
+function neighbour(cell, direction) {
+  return cell +
+    DIRECTIONS[direction][1] * N +
+    DIRECTIONS[direction][0];
 }
 
-// Shortest possible path (breadth-first search), used to judge the robot
-function shortest(w, a, b) {
-  const d = new Int16Array(N * N).fill(-1), q = [a];
-  d[a] = 0;
-  for (let h = 0; h < q.length; h++) {
-    const c = q[h];
-    if (c === b) return d[c];
-    for (let i = 0; i < 4; i++) {
-      if (!((w[c] >> i) & 1)) {
-        const n = c + D[i][1] * N + D[i][0];
-        if (d[n] < 0) { d[n] = d[c] + 1; q.push(n); }
+function openDirections(walls, cell) {
+  const result = [];
+
+  for (let direction = 0; direction < 4; direction++) {
+    if (!(walls[cell] & (1 << direction))) {
+      result.push(direction);
+    }
+  }
+
+  return result;
+}
+
+// ------------------------------------------------------------
+// Maze generation
+// ------------------------------------------------------------
+
+function generateMaze() {
+  const walls = new Uint8Array(N * N).fill(15);
+  const visited = new Uint8Array(N * N);
+  const stack = [randomInt(N * N)];
+
+  visited[stack[0]] = 1;
+
+  while (stack.length) {
+    const cell = stack[stack.length - 1];
+    const x = cell % N;
+    const y = Math.floor(cell / N);
+    const options = [];
+
+    for (let direction = 0; direction < 4; direction++) {
+      const nx = x + DIRECTIONS[direction][0];
+      const ny = y + DIRECTIONS[direction][1];
+
+      if (
+        nx >= 0 &&
+        ny >= 0 &&
+        nx < N &&
+        ny < N &&
+        !visited[ny * N + nx]
+      ) {
+        options.push(direction);
+      }
+    }
+
+    if (!options.length) {
+      stack.pop();
+      continue;
+    }
+
+    const direction = options[randomInt(options.length)];
+    const next = neighbour(cell, direction);
+
+    walls[cell] &= ~(1 << direction);
+    walls[next] &= ~(1 << ((direction + 2) % 4));
+
+    visited[next] = 1;
+    stack.push(next);
+  }
+
+  return walls;
+}
+
+// ------------------------------------------------------------
+// Shortest path
+// ------------------------------------------------------------
+
+function shortestDistance(walls, start, goal) {
+  const distance = new Int16Array(N * N).fill(-1);
+  const queue = [start];
+
+  distance[start] = 0;
+
+  for (let head = 0; head < queue.length; head++) {
+    const cell = queue[head];
+
+    if (cell === goal) {
+      return distance[cell];
+    }
+
+    for (const direction of openDirections(walls, cell)) {
+      const next = neighbour(cell, direction);
+
+      if (distance[next] < 0) {
+        distance[next] = distance[cell] + 1;
+        queue.push(next);
       }
     }
   }
+
   return -1;
 }
 
-// ===== 2. One "episode": a maze, a start, a goal =====
-function newEnv(max) {
-  const w = genMaze();
-  let s, g;
-  do { s = rnd(N * N); g = rnd(N * N); }
-  while (Math.abs(s % N - g % N) + Math.abs(Math.floor(s / N) - Math.floor(g / N)) < 8);
-  const v = new Uint8Array(N * N);   // how many times each cell was visited
-  v[s] = 1;
-  return { w, pos: s, g, v, steps: 0, done: false, won: false, max, opt: shortest(w, s, g), trail: [s] };
+// ------------------------------------------------------------
+// Q-learning environment
+// ------------------------------------------------------------
+
+function createEnvironment(maxSteps = MAX_STEPS) {
+  const walls = generateMaze();
+
+  let start;
+  let goal;
+
+  do {
+    start = randomInt(N * N);
+    goal = randomInt(N * N);
+  } while (
+    Math.abs(start % N - goal % N) +
+    Math.abs(
+      Math.floor(start / N) -
+      Math.floor(goal / N)
+    ) < N / 2
+  );
+
+  const visits = new Uint8Array(N * N);
+  visits[start] = 1;
+
+  return {
+    walls,
+    position: start,
+    goal,
+    visits,
+    steps: 0,
+    done: false,
+    won: false,
+    maxSteps,
+    optimal: shortestDistance(walls, start, goal),
+    trail: [start]
+  };
 }
 
-// ===== 3. What the robot can sense =====
-// For each side: wall (0), new cell (1), visited once (2), visited a lot (3).
-// Plus: is the goal left/right and up/down? All squashed into one number.
-function obs(e) {
-  const c = e.pos;
-  let k = 0;
-  for (let i = 0; i < 4; i++) {
-    const s = ((e.w[c] >> i) & 1) ? 0 : 1 + Math.min(e.v[c + D[i][1] * N + D[i][0]], 2);
-    k += s << (2 * i);
+function getObservation(environment) {
+  let key = 0;
+  const cell = environment.position;
+
+  for (let direction = 0; direction < 4; direction++) {
+    const next = neighbour(cell, direction);
+
+    const state =
+      (environment.walls[cell] >> direction) & 1
+        ? 0
+        : 1 + Math.min(environment.visits[next], 2);
+
+    key += state << (2 * direction);
   }
-  const gx = Math.sign((e.g % N) - (c % N)) + 1;                        // 0, 1 or 2
-  const gy = Math.sign(Math.floor(e.g / N) - Math.floor(c / N)) + 1;    // 0, 1 or 2
-  return k * 9 + gx * 3 + gy;
+
+  const goalX =
+    Math.sign(
+      (environment.goal % N) -
+      (cell % N)
+    ) + 1;
+
+  const goalY =
+    Math.sign(
+      Math.floor(environment.goal / N) -
+      Math.floor(cell / N)
+    ) + 1;
+
+  return key * 9 + goalX * 3 + goalY;
 }
 
-function open(e) {   // which directions have no wall?
-  const o = [];
-  for (let i = 0; i < 4; i++) if (!((e.w[e.pos] >> i) & 1)) o.push(i);
-  return o;
-}
+function chooseAction(
+  environment,
+  observation,
+  explorationRate
+) {
+  const available = openDirections(
+    environment.walls,
+    environment.position
+  );
 
-// ===== 4. Choosing a move =====
-// Sometimes random (to explore), otherwise the move with the best score.
-function act(e, s, epsilon) {
-  const ok = open(e);
-  if (Math.random() < epsilon) return ok[rnd(ok.length)];
-  let best = -1e9, bs = [];
-  for (const i of ok) {
-    const q = Q[s * 4 + i];
-    if (q > best + 1e-9) { best = q; bs = [i]; }
-    else if (Math.abs(q - best) <= 1e-9) bs.push(i);
+  if (
+    Math.random() < explorationRate
+  ) {
+    return available[
+      randomInt(available.length)
+    ];
   }
-  return bs[rnd(bs.length)];
-}
 
-// Make the move and return a reward
-function step(e, a) {
-  const n = e.pos + D[a][1] * N + D[a][0];
-  let r = -0.05;                    // small cost for every step
-  if (e.v[n] > 0) r -= 0.15;        // extra cost for going back to a visited cell
-  e.pos = n; e.v[n]++; e.steps++; e.trail.push(n);
-  if (n === e.g) { e.done = e.won = true; r = 10; }   // big reward for the goal
-  else if (e.steps >= e.max) e.done = true;
-  return r;
-}
+  let bestValue = -Infinity;
+  let bestActions = [];
 
-// ===== 5. Learning =====
-// After each move: nudge the score of that move toward
-// (reward now + best score available in the next situation).
-function trainEp() {
-  const e = newEnv(MAX_TRAIN), al = 0.2, ga = 0.95;
-  ex = Math.max(0.05, 0.35 * Math.exp(-eps / 1500));   // explore less over time
-  let s = obs(e);
-  while (!e.done) {
-    const a = act(e, s, ex), r = step(e, a), s2 = obs(e);
-    if (!seen[s]) { seen[s] = 1; nSeen++; }
-    let t = r;
-    if (!e.done) {
-      let m = -1e9;
-      for (const i of open(e)) m = Math.max(m, Q[s2 * 4 + i]);
-      t += ga * m;
-    }
-    Q[s * 4 + a] += al * (t - Q[s * 4 + a]);
-    s = s2;
-  }
-  eps++; batch.n++;
-  if (e.won) { batch.s++; batch.eff += e.opt / e.steps; }
-  if (batch.n === 100) {   // every 100 mazes, add a point to the chart
-    hist.push([batch.s / 100, batch.s ? batch.eff / batch.s : 0]);
-    batch = { s: 0, n: 0, eff: 0 };
-  }
-}
+  for (const action of available) {
+    const value =
+      qTable[observation * 4 + action];
 
-// ===== 6. Testing on a brand-new maze =====
-let demo = newEnv(MAX_TEST);
-const msg = t => { $('msg').textContent = t; };
-
-function startTest() {
-  demo = newEnv(MAX_TEST);
-  demoOn = true;
-  acc = 0;
-  msg('Testing on a brand-new maze...');
-}
-function report() {
-  const e = demo;
-  msg(e.won
-    ? `Reached the goal in ${e.steps} steps. Shortest possible: ${e.opt}.`
-    : `Stuck. Hit the ${e.max}-step limit without reaching the goal.`);
-}
-function stats() {
-  $('sEp').textContent = eps.toLocaleString();
-  $('sEx').textContent = Math.round(ex * 100) + '%';
-  $('sSeen').textContent = nSeen;
-}
-
-// ===== 7. Drawing =====
-function draw() {
-  const css = getComputedStyle(document.documentElement);
-  const c = n => css.getPropertyValue(n).trim();
-  const W = cv.width, S = W / N, e = demo;
-  cx.clearRect(0, 0, W, W);
-
-  // blue shading on visited cells
-  for (let i = 0; i < N * N; i++) {
-    if (e.v[i]) {
-      cx.fillStyle = `rgba(${c('--heat')},${Math.min(0.12 * e.v[i], 0.4)})`;
-      cx.fillRect((i % N) * S, Math.floor(i / N) * S, S, S);
+    if (value > bestValue + 1e-8) {
+      bestValue = value;
+      bestActions = [action];
+    } else if (
+      Math.abs(value - bestValue) < 1e-8
+    ) {
+      bestActions.push(action);
     }
   }
-  // goal (two rings)
-  const gx = (e.g % N + 0.5) * S, gy = (Math.floor(e.g / N) + 0.5) * S;
-  cx.strokeStyle = c('--goal'); cx.lineWidth = 4;
-  [0.3, 0.15].forEach(r => { cx.beginPath(); cx.arc(gx, gy, r * S, 0, 7); cx.stroke(); });
-  // trail
-  cx.strokeStyle = c('--trail'); cx.lineWidth = 4; cx.lineJoin = 'round';
-  cx.beginPath();
-  e.trail.forEach((t, i) => {
-    const x = (t % N + 0.5) * S, y = (Math.floor(t / N) + 0.5) * S;
-    i ? cx.lineTo(x, y) : cx.moveTo(x, y);
-  });
-  cx.stroke();
-  // walls
-  cx.strokeStyle = c('--ink'); cx.lineWidth = 5; cx.lineCap = 'round';
-  cx.beginPath();
-  for (let i = 0; i < N * N; i++) {
-    const x = (i % N) * S, y = Math.floor(i / N) * S, w = e.w[i];
-    if (w & 1) { cx.moveTo(x, y);         cx.lineTo(x + S, y); }
-    if (w & 2) { cx.moveTo(x + S, y);     cx.lineTo(x + S, y + S); }
-    if (w & 4) { cx.moveTo(x, y + S);     cx.lineTo(x + S, y + S); }
-    if (w & 8) { cx.moveTo(x, y);         cx.lineTo(x, y + S); }
-  }
-  cx.stroke();
-  // robot: a rounded square with a small tick toward each open side
-  const rx = (e.pos % N + 0.5) * S, ry = (Math.floor(e.pos / N) + 0.5) * S;
-  cx.lineWidth = 3;
-  for (const i of open(e)) {
-    cx.beginPath();
-    cx.moveTo(rx + D[i][0] * 0.2 * S, ry + D[i][1] * 0.2 * S);
-    cx.lineTo(rx + D[i][0] * 0.4 * S, ry + D[i][1] * 0.4 * S);
-    cx.stroke();
-  }
-  cx.fillStyle = c('--robot');
-  cx.beginPath(); cx.roundRect(rx - 0.2 * S, ry - 0.2 * S, 0.4 * S, 0.4 * S, 8);
-  cx.fill(); cx.stroke();
+
+  return bestActions[
+    randomInt(bestActions.length)
+  ];
 }
 
-function drawChart() {
-  const css = getComputedStyle(document.documentElement);
-  const c = n => css.getPropertyValue(n).trim();
-  const W = ch.width, H = ch.height;
-  cc.clearRect(0, 0, W, H);
-  cc.strokeStyle = c('--line'); cc.lineWidth = 1;
-  [0, 0.5, 1].forEach(f => {
-    const y = H - 6 - (H - 12) * f;
-    cc.beginPath(); cc.moveTo(6, y); cc.lineTo(W - 6, y); cc.stroke();
-  });
-  [[0, '--trail'], [1, '--goal']].forEach(([k, col]) => {
-    cc.strokeStyle = c(col); cc.lineWidth = 2; cc.beginPath();
-    hist.forEach((h, i) => {
-      const x = 6 + (W - 12) * i / Math.max(hist.length - 1, 19);
-      const y = H - 6 - (H - 12) * h[k];
-      i ? cc.lineTo(x, y) : cc.moveTo(x, y);
-    });
-    cc.stroke();
-  });
+function moveAgent(environment, action) {
+  const next = neighbour(
+    environment.position,
+    action
+  );
+
+  let reward = -0.04;
+
+  if (environment.visits[next]) {
+    reward -= 0.12;
+  }
+
+  environment.position = next;
+  environment.visits[next]++;
+  environment.steps++;
+  environment.trail.push(next);
+
+  if (next === environment.goal) {
+    environment.done = true;
+    environment.won = true;
+    reward = 10;
+  } else if (
+    environment.steps >= environment.maxSteps
+  ) {
+    environment.done = true;
+  }
+
+  return reward;
 }
 
-// ===== 8. The main loop: runs about 60 times per second =====
-function loop(t) {
-  const dt = t - last; last = t;
+// ------------------------------------------------------------
+// Q-learning
+// ------------------------------------------------------------
+
+function trainEpisode() {
+  const environment = createEnvironment();
+
+  const learningRate = 0.18;
+  const discount = 0.96;
+
+  epsilon = Math.max(
+    0.03,
+    0.35 * Math.exp(-episodes / 1800)
+  );
+
+  let observation =
+    getObservation(environment);
+
+  while (!environment.done) {
+    const action = chooseAction(
+      environment,
+      observation,
+      epsilon
+    );
+
+    const reward =
+      moveAgent(environment, action);
+
+    const nextObservation =
+      getObservation(environment);
+
+    if (!seenStates[observation]) {
+      seenStates[observation] = 1;
+      learnedStates++;
+    }
+
+    let target = reward;
+
+    if (!environment.done) {
+      let bestNext = -Infinity;
+
+      for (
+        const nextAction of openDirections(
+          environment.walls,
+          environment.position
+        )
+      ) {
+        bestNext = Math.max(
+          bestNext,
+          qTable[
+            nextObservation * 4 +
+            nextAction
+          ]
+        );
+      }
+
+      target += discount * bestNext;
+    }
+
+    const index =
+      observation * 4 + action;
+
+    qTable[index] +=
+      learningRate *
+      (target - qTable[index]);
+
+    observation = nextObservation;
+  }
+
+  episodes++;
+
+  if (environment.won) {
+    trainingWins++;
+  }
+}
+
+// ------------------------------------------------------------
+// A* / Dijkstra
+// ------------------------------------------------------------
+
+function searchPath(
+  walls,
+  start,
+  goal,
+  heuristic
+) {
+  const size = N * N;
+  const INF = 1e9;
+
+  const distance =
+    new Float64Array(size);
+
+  const previous =
+    new Int16Array(size).fill(-1);
+
+  const queue = [];
+  const closed =
+    new Uint8Array(size);
+
+  distance.fill(INF);
+  distance[start] = 0;
+
+  queue.push({
+    cell: start,
+    priority: heuristic(start)
+  });
+
+  while (queue.length) {
+    queue.sort(
+      (a, b) =>
+        a.priority - b.priority
+    );
+
+    const current =
+      queue.shift().cell;
+
+    if (closed[current]) {
+      continue;
+    }
+
+    closed[current] = 1;
+
+    if (current === goal) {
+      break;
+    }
+
+    for (
+      const direction of openDirections(
+        walls,
+        current
+      )
+    ) {
+      const next =
+        neighbour(
+          current,
+          direction
+        );
+
+      const newDistance =
+        distance[current] + 1;
+
+      if (
+        newDistance <
+        distance[next]
+      ) {
+        distance[next] =
+          newDistance;
+
+        previous[next] =
+          current;
+
+        queue.push({
+          cell: next,
+          priority:
+            newDistance +
+            heuristic(next)
+        });
+      }
+    }
+  }
+
+  if (distance[goal] === INF) {
+    return [];
+  }
+
+  const path = [];
+
+  for (
+    let cell = goal;
+    cell !== -1;
+    cell = previous[cell]
+  ) {
+    path.push(cell);
+  }
+
+  return path.reverse();
+}
+
+function dijkstra(walls, start, goal) {
+  return searchPath(
+    walls,
+    start,
+    goal,
+    () => 0
+  );
+}
+
+function aStar(walls, start, goal) {
+  const goalX = goal % N;
+  const goalY = Math.floor(goal / N);
+
+  return searchPath(
+    walls,
+    start,
+    goal,
+    cell =>
+      Math.abs(
+        cell % N - goalX
+      ) +
+      Math.abs(
+        Math.floor(cell / N) -
+        goalY
+      )
+  );
+}
+
+// ------------------------------------------------------------
+// Race
+// ------------------------------------------------------------
+
+function startRace() {
+  const walls = generateMaze();
+
+  let start = randomInt(N * N);
+  let goal = randomInt(N * N);
+
+  while (start === goal) {
+    goal = randomInt(N * N);
+  }
+
+  const astarPath =
+    aStar(walls, start, goal);
+
+  const dijkstraPath =
+    dijkstra(walls, start, goal);
+
+  const neural = {
+    walls,
+    position: start,
+    goal,
+    visits: new Uint8Array(N * N),
+    trail: [start],
+    steps: 0,
+    done: false,
+    won: false,
+    maxSteps: MAX_STEPS
+  };
+
+  neural.visits[start] = 1;
+
+  race = {
+    walls,
+    start,
+    goal,
+
+    astarPath,
+    dijkstraPath,
+
+    astarIndex: 0,
+    dijkstraIndex: 0,
+
+    neural,
+
+    accumulator: 0,
+
+    // IMPORTANT:
+    // This remains true after completion.
+    // We do NOT set race = null.
+    finished: false
+  };
+
+  updateRaceStats();
+
+  ui.status.textContent =
+    'New maze loaded. All three agents are racing from the same start to the same goal.';
+}
+
+function updateRaceStats() {
+  if (!race) return;
+
+  ui.aStat.textContent =
+    `${race.astarIndex} steps`;
+
+  ui.dStat.textContent =
+    `${race.dijkstraIndex} steps`;
+
+  ui.qStat.textContent =
+    `${race.neural.steps} steps`;
+}
+
+function isRaceFinished() {
+  return (
+    race.astarIndex >=
+      race.astarPath.length - 1 &&
+
+    race.dijkstraIndex >=
+      race.dijkstraPath.length - 1 &&
+
+    race.neural.done
+  );
+}
+
+function advanceRace() {
+  if (!race || race.finished) {
+    return;
+  }
+
+  if (
+    race.astarIndex <
+    race.astarPath.length - 1
+  ) {
+    race.astarIndex++;
+  }
+
+  if (
+    race.dijkstraIndex <
+    race.dijkstraPath.length - 1
+  ) {
+    race.dijkstraIndex++;
+  }
+
+  if (!race.neural.done) {
+    const observation =
+      getObservation(race.neural);
+
+    const action =
+      chooseAction(
+        race.neural,
+        observation,
+        0
+      );
+
+    moveAgent(
+      race.neural,
+      action
+    );
+  }
+
+  updateRaceStats();
+
+  if (isRaceFinished()) {
+    race.finished = true;
+
+    // DO NOT clear the race here.
+    // The completed maze remains rendered.
+    ui.status.textContent =
+      'Race complete. Final paths and agent positions remain visible.';
+  }
+}
+
+// ------------------------------------------------------------
+// Drawing
+// ------------------------------------------------------------
+
+function drawPath(
+  path,
+  endIndex,
+  color,
+  width
+) {
+  if (path.length < 2) {
+    return;
+  }
+
+  const size =
+    canvas.width / N;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  ctx.beginPath();
+
+  for (
+    let i = 0;
+    i <= endIndex &&
+    i < path.length;
+    i++
+  ) {
+    const cell = path[i];
+
+    const x =
+      (cell % N + 0.5) *
+      size;
+
+    const y =
+      (Math.floor(cell / N) + 0.5) *
+      size;
+
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+
+  ctx.stroke();
+}
+
+function drawAgent(
+  cell,
+  color,
+  radius
+) {
+  const size =
+    canvas.width / N;
+
+  const x =
+    (cell % N + 0.5) *
+    size;
+
+  const y =
+    (Math.floor(cell / N) + 0.5) *
+    size;
+
+  ctx.fillStyle = color;
+
+  ctx.beginPath();
+  ctx.arc(
+    x,
+    y,
+    radius,
+    0,
+    Math.PI * 2
+  );
+  ctx.fill();
+
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function drawMaze() {
+  ctx.clearRect(
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+
+  ctx.fillStyle =
+    COLORS.background;
+
+  ctx.fillRect(
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+
+  if (!race) {
+    return;
+  }
+
+  const size =
+    canvas.width / N;
+
+  // Grid
+  ctx.strokeStyle =
+    COLORS.grid;
+
+  ctx.lineWidth = 1;
+
+  for (let i = 1; i < N; i++) {
+    ctx.beginPath();
+    ctx.moveTo(
+      i * size,
+      0
+    );
+    ctx.lineTo(
+      i * size,
+      canvas.height
+    );
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(
+      0,
+      i * size
+    );
+    ctx.lineTo(
+      canvas.width,
+      i * size
+    );
+    ctx.stroke();
+  }
+
+  // NeuroNav trail
+  drawPath(
+    race.neural.trail,
+    race.neural.trail.length - 1,
+    COLORS.neural,
+    3
+  );
+
+  // Dijkstra
+  drawPath(
+    race.dijkstraPath,
+    race.dijkstraIndex,
+    COLORS.dijkstra,
+    3
+  );
+
+  // A*
+  drawPath(
+    race.astarPath,
+    race.astarIndex,
+    COLORS.astar,
+    4
+  );
+
+  // Goal
+  const goalX =
+    (race.goal % N + 0.5) *
+    size;
+
+  const goalY =
+    (Math.floor(race.goal / N) + 0.5) *
+    size;
+
+  ctx.strokeStyle =
+    COLORS.goal;
+
+  ctx.lineWidth = 4;
+
+  ctx.beginPath();
+
+  ctx.arc(
+    goalX,
+    goalY,
+    size * 0.23,
+    0,
+    Math.PI * 2
+  );
+
+  ctx.stroke();
+
+  // Maze walls
+  ctx.strokeStyle =
+    COLORS.wall;
+
+  ctx.lineWidth = 2;
+
+  for (
+    let cell = 0;
+    cell < N * N;
+    cell++
+  ) {
+    const x =
+      (cell % N) * size;
+
+    const y =
+      Math.floor(cell / N) *
+      size;
+
+    const walls =
+      race.walls[cell];
+
+    ctx.beginPath();
+
+    if (walls & 1) {
+      ctx.moveTo(x, y);
+      ctx.lineTo(
+        x + size,
+        y
+      );
+    }
+
+    if (walls & 2) {
+      ctx.moveTo(
+        x + size,
+        y
+      );
+
+      ctx.lineTo(
+        x + size,
+        y + size
+      );
+    }
+
+    if (walls & 4) {
+      ctx.moveTo(
+        x,
+        y + size
+      );
+
+      ctx.lineTo(
+        x + size,
+        y + size
+      );
+    }
+
+    if (walls & 8) {
+      ctx.moveTo(x, y);
+
+      ctx.lineTo(
+        x,
+        y + size
+      );
+    }
+
+    ctx.stroke();
+  }
+
+  // Agents are drawn last.
+  // This keeps the final positions visible
+  // after the race has completed.
+
+  drawAgent(
+    race.astarPath[
+      race.astarIndex
+    ],
+    COLORS.astar,
+    7
+  );
+
+  drawAgent(
+    race.dijkstraPath[
+      race.dijkstraIndex
+    ],
+    COLORS.dijkstra,
+    7
+  );
+
+  drawAgent(
+    race.neural.position,
+    COLORS.neural,
+    7
+  );
+}
+
+// ------------------------------------------------------------
+// UI
+// ------------------------------------------------------------
+
+function updateLearningStats() {
+  ui.episodes.textContent =
+    episodes.toLocaleString();
+
+  ui.epsilon.textContent =
+    `${Math.round(
+      epsilon * 100
+    )}%`;
+
+  ui.states.textContent =
+    learnedStates.toLocaleString();
+
+  ui.wins.textContent =
+    episodes
+      ? `${Math.round(
+          (trainingWins / episodes) *
+          100
+        )}%`
+      : '0%';
+}
+
+ui.train.addEventListener(
+  'click',
+  () => {
+    training = !training;
+
+    ui.train.textContent =
+      training
+        ? 'Pause training'
+        : 'Start training';
+
+    ui.status.textContent =
+      training
+        ? 'Training NeuroNav across random mazes…'
+        : 'Training paused.';
+  }
+);
+
+ui.race.addEventListener(
+  'click',
+  () => {
+    training = false;
+
+    ui.train.textContent =
+      'Start training';
+
+    startRace();
+  }
+);
+
+ui.reset.addEventListener(
+  'click',
+  () => {
+    qTable.fill(0);
+    seenStates.fill(0);
+
+    episodes = 0;
+    epsilon = 0.35;
+    learnedStates = 0;
+    trainingWins = 0;
+    training = false;
+
+    ui.train.textContent =
+      'Start training';
+
+    updateLearningStats();
+
+    ui.status.textContent =
+      'Brain reset. NeuroNav has no learned experience.';
+  }
+);
+
+// ------------------------------------------------------------
+// Animation loop
+// ------------------------------------------------------------
+
+function animationLoop(timestamp) {
+  const delta =
+    timestamp - lastFrame;
+
+  lastFrame = timestamp;
+
   if (training) {
-    for (let i = 0; i < 20; i++) trainEp();   // 20 practice mazes per frame
-    stats(); drawChart();
+    for (
+      let i = 0;
+      i < TRAIN_BATCH;
+      i++
+    ) {
+      trainEpisode();
+    }
+
+    updateLearningStats();
   }
-  if (demoOn && !demo.done && (acc += dt) > 70) {   // one test step every 70 ms
-    acc = 0;
-    step(demo, act(demo, obs(demo), 0));
-    if (demo.done) { demoOn = false; report(); }
+
+  // Once race.finished becomes true,
+  // advanceRace() stops, but drawMaze()
+  // continues. This is what keeps the
+  // completed maze on screen.
+
+  if (
+    race &&
+    !race.finished
+  ) {
+    race.accumulator += delta;
+
+    if (
+      race.accumulator >=
+      FRAME_STEP_MS
+    ) {
+      race.accumulator = 0;
+      advanceRace();
+    }
   }
-  draw();
-  requestAnimationFrame(loop);
+
+  drawMaze();
+
+  requestAnimationFrame(
+    animationLoop
+  );
 }
 
-// ===== 9. Buttons =====
-$('btnTrain').onclick = () => {
-  training = !training;
-  $('btnTrain').textContent = training ? 'Pause training' : 'Resume training';
-  if (training) msg('Practising on random mazes. Test it whenever you like.');
-};
-$('btnTest').onclick = startTest;
-$('btnReset').onclick = () => {
-  Q.fill(0); seen.fill(0);
-  eps = nSeen = 0; ex = 0.35; hist = [];
-  batch = { s: 0, n: 0, eff: 0 }; training = false;
-  $('btnTrain').textContent = 'Start training';
-  stats(); drawChart();
-  msg('Brain wiped. Test it now to see an untrained robot wander.');
-};
+// ------------------------------------------------------------
+// Start
+// ------------------------------------------------------------
 
-stats(); drawChart();
-requestAnimationFrame(loop);
+updateLearningStats();
+startRace();
+
+requestAnimationFrame(
+  animationLoop
+);
