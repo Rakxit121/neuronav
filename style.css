@@ -1,0 +1,93 @@
+:root {
+  --bg: #e9eee8;
+  --panel: #f6f8f4;
+  --ink: #1c2731;
+  --mute: #55636b;
+  --line: #c9d3cb;
+  --robot: #f0a500;
+  --trail: #2467d1;
+  --goal: #0f8a6a;
+  --heat: 36, 103, 209;
+}
+
+/* Dark mode for people whose device is set to dark */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111a20;
+    --panel: #18242c;
+    --ink: #e6edf0;
+    --mute: #93a4ad;
+    --line: #2b3b45;
+    --robot: #ffb81c;
+    --trail: #6ea2ff;
+    --goal: #3ed0a4;
+    --heat: 110, 162, 255;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 16px/1.5 "Bricolage Grotesque", system-ui, sans-serif;
+}
+
+/* Two columns on wide screens: maze on the left, controls on the right */
+main {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 28px 16px 40px;
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  align-items: start;
+}
+
+/* One column on phones */
+@media (max-width: 820px) {
+  main { grid-template-columns: minmax(0, 1fr); }
+}
+
+header { grid-column: 1 / -1; }
+h1 { font-size: clamp(2.2rem, 6vw, 3.6rem); line-height: 1; margin: 0 0 10px; letter-spacing: -0.03em; }
+header p { margin: 0; max-width: 58ch; color: var(--mute); }
+
+.stage, .side {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+}
+.side { padding: 16px; display: grid; gap: 16px; }
+
+canvas { display: block; width: 100%; height: auto; }
+#maze { aspect-ratio: 1; }
+
+.btns { display: grid; gap: 8px; }
+button {
+  font: inherit;
+  font-weight: 700;
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 2px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+button.primary { background: var(--ink); color: var(--bg); }
+button:hover { opacity: 0.85; }
+button:focus-visible { outline: 3px solid var(--trail); outline-offset: 2px; }
+
+dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; }
+dt { color: var(--mute); }
+dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.key { display: flex; gap: 16px; font-size: 0.85rem; color: var(--mute); margin-top: 6px; }
+.key i { display: inline-block; width: 14px; height: 3px; margin-right: 6px; vertical-align: middle; }
+
+#msg { margin: 0; min-height: 3em; font-weight: 700; }
+h2 { font-size: 1rem; margin: 0 0 4px; }
+.how { font-size: 0.9rem; color: var(--mute); margin: 0; }

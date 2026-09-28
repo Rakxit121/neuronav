@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NeuroNav</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>NeuroNav</h1>
+      <p>A tiny robot learns to find its way through mazes it has never seen. It only senses the walls around it and roughly which way the goal lies.</p>
+    </header>
+
+    <section class="stage">
+      <canvas id="maze" width="720" height="720" aria-label="Maze with the robot, its trail and the goal"></canvas>
+    </section>
+
+    <aside class="side">
+      <div class="btns">
+        <button id="btnTrain" class="primary">Start training</button>
+        <button id="btnTest">Test on a new maze</button>
+        <button id="btnReset">Reset the robot's brain</button>
+      </div>
+
+      <p id="msg" role="status" aria-live="polite">Press Start training, then test the robot on a maze it has never seen.</p>
+
+      <dl>
+        <dt>Mazes practised</dt><dd id="sEp">0</dd>
+        <dt>Random-move rate</dt><dd id="sEx">35%</dd>
+        <dt>Situations learned</dt><dd id="sSeen">0</dd>
+      </dl>
+
+      <div>
+        <canvas id="chart" width="320" height="120" aria-label="Learning curve"></canvas>
+        <div class="key">
+          <span><i style="background:var(--trail)"></i>Reaches goal</span>
+          <span><i style="background:var(--goal)"></i>Path efficiency</span>
+        </div>
+      </div>
+
+      <div>
+        <h2>How it learns</h2>
+        <p class="how">Each step, the robot sees which of the four sides are open, whether each open side is new or already visited, and whether the goal is above, below, left or right. It learns what to do in each situation with Q-learning across thousands of random mazes, so the strategy carries over to new layouts. Blue shading shows cells it has visited.</p>
+      </div>
+    </aside>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
